@@ -321,6 +321,9 @@ tr:hover td{background:rgba(59,130,246,.03)}
 .tbl-wrap{overflow-x:auto}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 </head>
 <body>
 <!-- LOGIN SCREEN -->
@@ -2133,6 +2136,21 @@ function doReset() {
 }
 
 // ═══════════════════════════════════════════════
+//  FIREBASE CONFIG
+// ═══════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey: "AIzaSyDIOxc81n3Be02-ZRGfTvxnfIyNMWdqQyo",
+  authDomain: "it-attendance-dddde.firebaseapp.com",
+  databaseURL: "https://it-attendance-dddde-default-rtdb.firebaseio.com",
+  projectId: "it-attendance-dddde",
+  storageBucket: "it-attendance-dddde.firebasestorage.app",
+  messagingSenderId: "969426355250",
+  appId: "1:969426355250:web:4eb1dc81c8f11d138f282b"
+};
+firebase.initializeApp(firebaseConfig);
+const fbDb = firebase.database();
+
+// ═══════════════════════════════════════════════
 //  AUTH — Login / Logout / Change Password
 // ═══════════════════════════════════════════════
 const AUTH_KEY   = 'hr_auth_v1';
@@ -2163,32 +2181,52 @@ function sha256(str) {
 // Make it sync but keep same call signature (no await needed)
 sha256.sync = true;
 
-// Load or init auth store
-function getAuth() {
-  try {
-    const raw = localStorage.getItem(AUTH_KEY);
-    if(raw) return JSON.parse(raw);
-  } catch(e){}
+// ── Firebase Auth helpers ──────────────────────
+// pwdHash مخزن في Firebase — يتزامن على كل الأجهزة
+// loggedIn مخزن في localStorage — خاص بكل جهاز
+
+function getLocalAuth() {
+  try { const r=localStorage.getItem(AUTH_KEY); if(r) return JSON.parse(r); } catch(e){}
   return null;
+}
+function setLocalAuth(obj) {
+  localStorage.setItem(AUTH_KEY, JSON.stringify(obj));
 }
 
 function initAuth() {
-  let auth = getAuth();
-  if(!auth) {
-    // First run — hash the default password
-    const hash = sha256('Objector@84');
-    auth = { user: ADMIN_USER, pwdHash: hash, loggedIn: false };
-    localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
-  }
-  // Check if URL has reset token first
+  // Check reset token first
   if(checkResetToken()) return;
 
-  if(auth.loggedIn) {
-    showApp(auth.user);
-  } else {
-    document.getElementById('login-screen').style.display = 'flex';
-    setTimeout(()=>document.getElementById('login-user').focus(), 100);
-  }
+  // Load pwdHash from Firebase
+  fbDb.ref('auth/config').once('value').then(snap => {
+    let cfg = snap.val();
+    if(!cfg || !cfg.pwdHash) {
+      // First run — set default password in Firebase
+      const hash = sha256('Objector@84');
+      cfg = { user: ADMIN_USER, pwdHash: hash };
+      fbDb.ref('auth/config').set(cfg);
+    }
+    // Store in localStorage for offline check
+    setLocalAuth({ user: cfg.user, pwdHash: cfg.pwdHash, loggedIn: getLocalAuth()?.loggedIn||false });
+
+    const local = getLocalAuth();
+    if(local && local.loggedIn) {
+      showApp(cfg.user);
+    } else {
+      document.getElementById('login-screen').style.display = 'flex';
+      setTimeout(()=>document.getElementById('login-user').focus(), 100);
+    }
+  }).catch(()=>{
+    // Offline fallback — use localStorage
+    const local = getLocalAuth();
+    if(local) {
+      if(local.loggedIn) showApp(local.user);
+      else { document.getElementById('login-screen').style.display='flex'; setTimeout(()=>document.getElementById('login-user').focus(),100); }
+    } else {
+      document.getElementById('login-screen').style.display='flex';
+      setTimeout(()=>document.getElementById('login-user').focus(),100);
+    }
+  });
 }
 
 function showApp(username) {
@@ -2201,8 +2239,6 @@ function doLogin() {
   const user = document.getElementById('login-user').value.trim();
   const pass = document.getElementById('login-pass').value;
   const err  = document.getElementById('login-err');
-  const auth = getAuth();
-
   err.style.display = 'none';
 
   if(!user || !pass) {
@@ -2212,25 +2248,40 @@ function doLogin() {
 
   const hash = sha256(pass);
 
-  if(user.toLowerCase() !== auth.user.toLowerCase() || hash !== auth.pwdHash) {
-    err.textContent = '❌ اسم المستخدم أو كلمة المرور غير صحيحة';
-    err.style.display = 'block';
-    document.getElementById('login-pass').value = '';
-    document.getElementById('login-pass').focus();
-    return;
-  }
+  // Load from Firebase for latest password
+  fbDb.ref('auth/config').once('value').then(snap => {
+    const cfg = snap.val() || getLocalAuth();
+    if(!cfg) { err.textContent='❌ خطأ في الاتصال'; err.style.display='block'; return; }
 
-  // Success
-  auth.loggedIn = true;
-  localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
-  showApp(auth.user);
-  toast('✅ مرحباً ' + auth.user + '!');
+    if(user.toLowerCase() !== cfg.user.toLowerCase() || hash !== cfg.pwdHash) {
+      err.textContent = '❌ اسم المستخدم أو كلمة المرور غير صحيحة';
+      err.style.display = 'block';
+      document.getElementById('login-pass').value = '';
+      document.getElementById('login-pass').focus();
+      return;
+    }
+    // Success
+    setLocalAuth({ user: cfg.user, pwdHash: cfg.pwdHash, loggedIn: true });
+    showApp(cfg.user);
+    toast('✅ مرحباً ' + cfg.user + '!');
+  }).catch(()=>{
+    // Offline fallback
+    const local = getLocalAuth();
+    if(!local) { err.textContent='❌ لا يوجد اتصال بالإنترنت'; err.style.display='block'; return; }
+    if(user.toLowerCase() !== local.user.toLowerCase() || hash !== local.pwdHash) {
+      err.textContent='❌ اسم المستخدم أو كلمة المرور غير صحيحة'; err.style.display='block';
+      document.getElementById('login-pass').value=''; return;
+    }
+    setLocalAuth({...local, loggedIn:true});
+    showApp(local.user);
+    toast('✅ مرحباً ' + local.user + '!');
+  });
 }
 
 function doLogout() {
   if(!confirm('هل تريد تسجيل الخروج؟')) return;
-  const auth = getAuth();
-  if(auth) { auth.loggedIn = false; localStorage.setItem(AUTH_KEY, JSON.stringify(auth)); }
+  const local = getLocalAuth();
+  if(local) setLocalAuth({...local, loggedIn:false});
   document.getElementById('login-user').value = '';
   document.getElementById('login-pass').value = '';
   document.getElementById('login-err').style.display = 'none';
@@ -2255,21 +2306,23 @@ function changePassword() {
     err.textContent = '❌ كلمة المرور الجديدة غير متطابقة'; err.style.display='block'; return;
   }
 
-  const auth    = getAuth();
   const oldHash = sha256(oldVal);
-  if(oldHash !== auth.pwdHash) {
-    err.textContent = '❌ كلمة المرور الحالية غير صحيحة'; err.style.display='block'; return;
-  }
-
-  auth.pwdHash = sha256(newVal);
-  localStorage.setItem(AUTH_KEY, JSON.stringify(auth));
-
-  // Clear fields
-  document.getElementById('chpwd-old').value = '';
-  document.getElementById('chpwd-new').value = '';
-  document.getElementById('chpwd-confirm').value = '';
-  closeModal('modal-chpwd');
-  toast('✅ تم تغيير كلمة المرور بنجاح');
+  fbDb.ref('auth/config').once('value').then(snap => {
+    const cfg = snap.val() || getLocalAuth();
+    if(oldHash !== cfg.pwdHash) {
+      err.textContent = '❌ كلمة المرور الحالية غير صحيحة'; err.style.display='block'; return;
+    }
+    const newHash = sha256(newVal);
+    // Save to Firebase — يتزامن على كل الأجهزة
+    fbDb.ref('auth/config').update({ pwdHash: newHash }).then(()=>{
+      setLocalAuth({ user: cfg.user, pwdHash: newHash, loggedIn: true });
+      document.getElementById('chpwd-old').value = '';
+      document.getElementById('chpwd-new').value = '';
+      document.getElementById('chpwd-confirm').value = '';
+      closeModal('modal-chpwd');
+      toast('✅ تم تغيير كلمة المرور — سيتزامن على كل أجهزتك تلقائياً ✅');
+    });
+  });
 }
 
 // ═══════════════════════════════════════════════
